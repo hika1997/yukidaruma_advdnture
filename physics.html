@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>ゆきだま物理シミュレーション</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: #0b1026;
+    touch-action: none; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+    font-family: "Segoe UI", "Hiragino Sans", sans-serif;
+  }
+  #canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #hud {
+    position: fixed; top: calc(12px + env(safe-area-inset-top)); left: 16px; z-index: 10;
+    color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.6); pointer-events: none;
+  }
+  #hud h1 { font-size: 16px; margin: 0 0 2px; font-weight: 600; }
+  #hud .sub { font-size: 12px; opacity: .8; }
+  #controls {
+    position: fixed; z-index: 10;
+    bottom: calc(14px + env(safe-area-inset-bottom));
+    left: 50%; transform: translateX(-50%);
+    display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
+    max-width: 96vw;
+  }
+  #controls button {
+    appearance: none; border: 1px solid rgba(255,255,255,.35);
+    background: rgba(255,255,255,.14); color: #fff;
+    font-size: 14px; padding: 10px 14px; border-radius: 20px;
+    backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+    touch-action: manipulation; cursor: pointer;
+    text-shadow: 0 1px 2px rgba(0,0,0,.5);
+  }
+  #controls button.on {
+    background: rgba(125,211,252,.4); border-color: rgba(125,211,252,.9);
+  }
+  #hint {
+    position: fixed; top: 34%;
+    left: 50%; transform: translateX(-50%); z-index: 10; width: 100%;
+    color: rgba(255,255,255,.7); font-size: 12px; text-align: center;
+    pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,.6);
+    transition: opacity 1s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="hud">
+  <h1>⛄ ゆきだま物理シミュレーション</h1>
+  <div class="sub">ボール: <span id="count">0</span> / タップで追加・ドラッグで投げる</div>
+</div>
+<div id="hint">空いた場所をタップ → 雪玉が生まれる<br>雪玉をつかんで投げてみよう</div>
+<div id="controls">
+  <button id="btn-add">❄️ 10個追加</button>
+  <button id="btn-gravity">🌌 ゼロG</button>
+  <button id="btn-tilt">📱 傾き</button>
+  <button id="btn-reset">🔄 リセット</button>
+</div>
+<script>
+"use strict";
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const countEl = document.getElementById("count");
+const hintEl = document.getElementById("hint");
+
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+// ---- 物理パラメータ ----
+const GRAVITY = 1600;          // px/s^2
+const RESTITUTION = 0.82;      // 反発係数
+const AIR_DRAG = 0.12;         // 空気抵抗(1/s)
+const WALL_FRICTION = 0.98;    // 壁での接線速度の減衰
+const SUBSTEPS = 4;            // 物理サブステップ
+const MAX_BALLS = 120;
+
+let gravityOn = true;
+let tiltOn = false;
+let tiltG = { x: 0, y: 1 };    // 傾きセンサーによる重力方向(正規化)
+
+const balls = [];
+const HUES = [200, 185, 220, 260, 300, 45, 150]; // 夜空に映えるパステル
+
+function spawnBall(x, y, r) {
+  if (balls.length >= MAX_BALLS) return null;
+  r = r || 14 + Math.random() * 22;
+  const b = {
+    x, y, r,
+    vx: (Math.random() - 0.5) * 200,
+    vy: (Math.random() - 0.5) * 200,
+    m: r * r,
+    hue: HUES[(Math.random() * HUES.length) | 0],
+    grabbed: false,
+  };
+  balls.push(b);
+  countEl.textContent = balls.length;
+  return b;
+}
+
+function spawnInitial() {
+  balls.length = 0;
+  const n = Math.min(18, MAX_BALLS);
+  for (let i = 0; i < n; i++) {
+    spawnBall(
+      W * 0.15 + Math.random() * W * 0.7,
+      H * 0.1 + Math.random() * H * 0.5
+    );
+  }
+}
+spawnInitial();
+
+// ---- 物理ステップ ----
+function physicsStep(dt) {
+  const gx = gravityOn ? (tiltOn ? tiltG.x : 0) * GRAVITY : 0;
+  const gy = gravityOn ? (tiltOn ? tiltG.y : 1) * GRAVITY : 0;
+  const drag = Math.max(0, 1 - AIR_DRAG * dt);
+
+  for (const b of balls) {
+    if (b.grabbed) continue;
+    b.vx = (b.vx + gx * dt) * drag;
+    b.vy = (b.vy + gy * dt) * drag;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+  }
+
+  // ボール同士の衝突(撃力ベース+位置補正)
+  for (let i = 0; i < balls.length; i++) {
+    const a = balls[i];
+    for (let j = i + 1; j < balls.length; j++) {
+      const b = balls[j];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      const minDist = a.r + b.r;
+      const d2 = dx * dx + dy * dy;
+      if (d2 >= minDist * minDist || d2 === 0) continue;
+      const d = Math.sqrt(d2);
+      const nx = dx / d, ny = dy / d;
+
+      // めり込み解消(質量比で配分)
+      const overlap = minDist - d;
+      const invA = a.grabbed ? 0 : 1 / a.m;
+      const invB = b.grabbed ? 0 : 1 / b.m;
+      const invSum = invA + invB;
+      if (invSum === 0) continue;
+      a.x -= nx * overlap * (invA / invSum);
+      a.y -= ny * overlap * (invA / invSum);
+      b.x += nx * overlap * (invB / invSum);
+      b.y += ny * overlap * (invB / invSum);
+
+      // 法線方向の相対速度に反発の撃力
+      const rvn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+      if (rvn >= 0) continue;
+      const jImp = -(1 + RESTITUTION) * rvn / invSum;
+      a.vx -= jImp * nx * invA;
+      a.vy -= jImp * ny * invA;
+      b.vx += jImp * nx * invB;
+      b.vy += jImp * ny * invB;
+    }
+  }
+
+  // 壁との衝突
+  for (const b of balls) {
+    if (b.grabbed) continue;
+    if (b.x - b.r < 0)      { b.x = b.r;     if (b.vx < 0) { b.vx = -b.vx * RESTITUTION; b.vy *= WALL_FRICTION; } }
+    else if (b.x + b.r > W) { b.x = W - b.r; if (b.vx > 0) { b.vx = -b.vx * RESTITUTION; b.vy *= WALL_FRICTION; } }
+    if (b.y - b.r < 0)      { b.y = b.r;     if (b.vy < 0) { b.vy = -b.vy * RESTITUTION; b.vx *= WALL_FRICTION; } }
+    else if (b.y + b.r > H) { b.y = H - b.r; if (b.vy > 0) { b.vy = -b.vy * RESTITUTION; b.vx *= WALL_FRICTION; } }
+  }
+}
+
+// ---- 背景の星 ----
+let stars = [];
+function makeStars() {
+  stars = [];
+  const n = Math.round((W * H) / 9000);
+  for (let i = 0; i < n; i++) {
+    stars.push({
+      x: Math.random() * W, y: Math.random() * H,
+      r: 0.4 + Math.random() * 1.2,
+      p: Math.random() * Math.PI * 2,
+      s: 0.5 + Math.random() * 2,
+    });
+  }
+}
+makeStars();
+window.addEventListener("resize", makeStars);
+
+// ---- 描画 ----
+function draw(t) {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#0b1026");
+  grad.addColorStop(1, "#1a2340");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const s of stars) {
+    const a = 0.35 + 0.55 * (0.5 + 0.5 * Math.sin(t * 0.001 * s.s + s.p));
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "#e0f2fe";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const b of balls) {
+    const g = ctx.createRadialGradient(
+      b.x - b.r * 0.35, b.y - b.r * 0.35, b.r * 0.1,
+      b.x, b.y, b.r
+    );
+    g.addColorStop(0, `hsla(${b.hue}, 80%, 92%, 1)`);
+    g.addColorStop(0.7, `hsla(${b.hue}, 70%, 70%, 0.95)`);
+    g.addColorStop(1, `hsla(${b.hue}, 70%, 55%, 0.9)`);
+    ctx.shadowColor = `hsla(${b.hue}, 80%, 70%, 0.8)`;
+    ctx.shadowBlur = b.grabbed ? 26 : 12;
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+}
+
+// ---- メインループ(固定タイムステップ) ----
+let last = performance.now();
+function loop(now) {
+  let frame = (now - last) / 1000;
+  last = now;
+  if (frame > 0.1) frame = 0.1; // タブ復帰時などの巨大なdtを抑制
+  const step = frame / SUBSTEPS;
+  for (let i = 0; i < SUBSTEPS; i++) physicsStep(step);
+  draw(now);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// ---- ポインタ操作(マルチタッチ対応) ----
+const pointers = new Map(); // pointerId -> { ball, pt }
+
+function ballAt(x, y) {
+  for (let i = balls.length - 1; i >= 0; i--) {
+    const b = balls[i];
+    const dx = x - b.x, dy = y - b.y;
+    if (dx * dx + dy * dy <= (b.r + 14) * (b.r + 14)) return b;
+  }
+  return null;
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  hintEl.style.opacity = "0";
+  const x = e.clientX, y = e.clientY;
+  const b = ballAt(x, y);
+  if (b) {
+    b.grabbed = true;
+    b.vx = 0; b.vy = 0;
+    pointers.set(e.pointerId, { ball: b, pt: performance.now() });
+  } else {
+    const nb = spawnBall(x, y);
+    if (nb) { nb.vx = 0; nb.vy = 0; }
+  }
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  const now = performance.now();
+  const dt = Math.max((now - p.pt) / 1000, 1 / 120);
+  const x = Math.max(p.ball.r, Math.min(W - p.ball.r, e.clientX));
+  const y = Math.max(p.ball.r, Math.min(H - p.ball.r, e.clientY));
+  // 直近の移動から速度を推定(離した瞬間の投擲速度になる)
+  p.ball.vx = p.ball.vx * 0.4 + ((x - p.ball.x) / dt) * 0.6;
+  p.ball.vy = p.ball.vy * 0.4 + ((y - p.ball.y) / dt) * 0.6;
+  p.ball.x = x;
+  p.ball.y = y;
+  p.pt = now;
+});
+
+function releasePointer(e) {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  p.ball.grabbed = false;
+  // 掴んだまま止めていた場合は速度を落とす
+  if (performance.now() - p.pt > 120) { p.ball.vx = 0; p.ball.vy = 0; }
+  pointers.delete(e.pointerId);
+}
+canvas.addEventListener("pointerup", releasePointer);
+canvas.addEventListener("pointercancel", releasePointer);
+
+// ---- ボタン ----
+document.getElementById("btn-add").addEventListener("click", () => {
+  for (let i = 0; i < 10; i++) {
+    spawnBall(W * 0.2 + Math.random() * W * 0.6, H * 0.05 + Math.random() * H * 0.3);
+  }
+});
+
+const btnGravity = document.getElementById("btn-gravity");
+btnGravity.addEventListener("click", () => {
+  gravityOn = !gravityOn;
+  btnGravity.classList.toggle("on", !gravityOn);
+  btnGravity.textContent = gravityOn ? "🌌 ゼロG" : "🌍 重力ON";
+});
+
+const btnTilt = document.getElementById("btn-tilt");
+btnTilt.addEventListener("click", async () => {
+  if (tiltOn) {
+    tiltOn = false;
+    btnTilt.classList.remove("on");
+    return;
+  }
+  // iOS 13+ は明示的な許可が必要
+  if (typeof DeviceOrientationEvent !== "undefined" &&
+      typeof DeviceOrientationEvent.requestPermission === "function") {
+    try {
+      const res = await DeviceOrientationEvent.requestPermission();
+      if (res !== "granted") return;
+    } catch (err) {
+      return;
+    }
+  }
+  tiltOn = true;
+  btnTilt.classList.add("on");
+});
+
+window.addEventListener("deviceorientation", (e) => {
+  if (!tiltOn || e.beta === null || e.gamma === null) return;
+  // beta: 前後傾き(-180..180) gamma: 左右傾き(-90..90)
+  const gx = Math.sin((e.gamma * Math.PI) / 180);
+  const gy = Math.sin((e.beta * Math.PI) / 180);
+  const len = Math.hypot(gx, gy);
+  if (len > 0.05) {
+    tiltG.x = gx / len * Math.min(len * 1.5, 1);
+    tiltG.y = gy / len * Math.min(len * 1.5, 1);
+  } else {
+    tiltG.x = 0; tiltG.y = 0;
+  }
+});
+
+document.getElementById("btn-reset").addEventListener("click", () => {
+  pointers.clear();
+  spawnInitial();
+});
+</script>
+</body>
+</html>

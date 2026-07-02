@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ゆきだるまアドベンチャー</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #0b1026; }
+  #app { position: fixed; inset: 0; }
+  .hud {
+    position: fixed; top: 16px; left: 16px; z-index: 10;
+    color: #fff; font-family: "Segoe UI", "Hiragino Sans", sans-serif;
+    text-shadow: 0 1px 3px rgba(0,0,0,.5);
+    user-select: none; pointer-events: none;
+  }
+  .hud .label { font-size: 13px; opacity: .85; margin-bottom: 4px; }
+  #sizebar {
+    width: 220px; height: 16px; border-radius: 8px;
+    background: rgba(255,255,255,.2); overflow: hidden;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,.3);
+  }
+  #sizefill {
+    height: 100%; width: 50%;
+    background: linear-gradient(90deg, #7dd3fc, #e0f2fe);
+    border-radius: 8px; transition: width .15s ease;
+  }
+  #crystals { margin-top: 10px; font-size: 15px; }
+  #help {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,.75); font-family: "Segoe UI", "Hiragino Sans", sans-serif;
+    font-size: 13px; text-shadow: 0 1px 3px rgba(0,0,0,.6);
+    user-select: none; pointer-events: none; text-align: center; z-index: 10;
+  }
+  #overlay {
+    position: fixed; inset: 0; z-index: 20;
+    display: none; align-items: center; justify-content: center; flex-direction: column;
+    background: rgba(8, 12, 34, .72); color: #fff;
+    font-family: "Segoe UI", "Hiragino Sans", sans-serif; text-align: center;
+  }
+  #overlay h1 { font-size: 44px; margin: 0 0 12px; letter-spacing: 2px; }
+  #overlay p { font-size: 16px; opacity: .9; margin: 4px 0; }
+  #overlay button {
+    margin-top: 24px; padding: 12px 36px; font-size: 17px; cursor: pointer;
+    border: none; border-radius: 999px; color: #0b1026; font-weight: bold;
+    background: linear-gradient(90deg, #bae6fd, #ffffff);
+    box-shadow: 0 4px 16px rgba(125, 211, 252, .4);
+  }
+  #overlay button:hover { transform: scale(1.05); }
+  #damage-vignette {
+    position: fixed; inset: 0; z-index: 15; pointer-events: none; opacity: 0;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(255,60,40,.55) 100%);
+    transition: opacity .1s ease;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div class="hud">
+  <div class="label">おおきさ</div>
+  <div id="sizebar"><div id="sizefill"></div></div>
+  <div id="crystals">💎 0 / 12</div>
+</div>
+
+<div id="help">WASD / 矢印キー で移動 — 雪の上を転がると大きくなる。炎に近づくと小さくなるよ!</div>
+<div id="damage-vignette"></div>
+
+<div id="overlay">
+  <h1 id="overlay-title"></h1>
+  <p id="overlay-text"></p>
+  <button id="restart-btn">もういちど あそぶ</button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------- 基本セットアップ ----------
+const WORLD_RADIUS = 90;
+const CRYSTAL_TOTAL = 12;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9db8d8);
+scene.fog = new THREE.Fog(0x9db8d8, 30, 110);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 300);
+
+const hemi = new THREE.HemisphereLight(0xdfeaff, 0x8899bb, 0.9);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff4e0, 1.1);
+sun.position.set(30, 50, 20);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -60; sun.shadow.camera.right = 60;
+sun.shadow.camera.top = 60; sun.shadow.camera.bottom = -60;
+sun.shadow.camera.far = 150;
+scene.add(sun);
+
+// ---------- 雪原 ----------
+const groundGeo = new THREE.CircleGeometry(WORLD_RADIUS + 20, 64);
+// ゆるやかな起伏
+{
+  const pos = groundGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i);
+    const r = Math.hypot(x, y);
+    if (r > 3) pos.setZ(i, Math.sin(x * 0.08) * Math.cos(y * 0.07) * 1.2);
+  }
+  groundGeo.computeVertexNormals();
+}
+const ground = new THREE.Mesh(
+  groundGeo,
+  new THREE.MeshStandardMaterial({ color: 0xf4f8ff, roughness: 0.95 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+function groundHeight(x, z) {
+  const r = Math.hypot(x, z);
+  if (r <= 3) return 0;
+  return Math.sin(x * 0.08) * Math.cos(-z * 0.07) * 1.2;
+}
+
+// ---------- 雪だるま(プレイヤー) ----------
+const snowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
+const player = new THREE.Group();
+
+const bottomBall = new THREE.Mesh(new THREE.SphereGeometry(0.55, 24, 24), snowMat);
+bottomBall.position.y = 0.55;
+bottomBall.castShadow = true;
+player.add(bottomBall);
+
+const upperBody = new THREE.Group(); // 胴体と頭(転がる下玉とは別に保持)
+const midBall = new THREE.Mesh(new THREE.SphereGeometry(0.38, 24, 24), snowMat);
+midBall.position.y = 1.28;
+midBall.castShadow = true;
+upperBody.add(midBall);
+
+const head = new THREE.Mesh(new THREE.SphereGeometry(0.27, 24, 24), snowMat);
+head.position.y = 1.82;
+head.castShadow = true;
+upperBody.add(head);
+
+// 目
+const eyeMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.4 });
+for (const sx of [-0.09, 0.09]) {
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.035, 10, 10), eyeMat);
+  eye.position.set(sx, 1.89, 0.24);
+  upperBody.add(eye);
+}
+// にんじんの鼻
+const nose = new THREE.Mesh(
+  new THREE.ConeGeometry(0.05, 0.28, 12),
+  new THREE.MeshStandardMaterial({ color: 0xff7f2a, roughness: 0.7 })
+);
+nose.rotation.x = Math.PI / 2;
+nose.position.set(0, 1.82, 0.38);
+upperBody.add(nose);
+// ボタン
+for (const by of [1.34, 1.2]) {
+  const btn = new THREE.Mesh(new THREE.SphereGeometry(0.035, 10, 10), eyeMat);
+  btn.position.set(0, by, 0.36);
+  upperBody.add(btn);
+}
+// 枝の腕
+const twigMat = new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.9 });
+for (const s of [-1, 1]) {
+  const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.035, 0.7, 8), twigMat);
+  arm.position.set(s * 0.62, 1.42, 0);
+  arm.rotation.z = s * -1.1;
+  arm.castShadow = true;
+  upperBody.add(arm);
+}
+// バケツ帽子
+const bucket = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.16, 0.21, 0.22, 16),
+  new THREE.MeshStandardMaterial({ color: 0x3b6ea5, roughness: 0.5, metalness: 0.3 })
+);
+bucket.position.set(0, 2.08, 0);
+bucket.rotation.z = 0.15;
+bucket.castShadow = true;
+upperBody.add(bucket);
+player.add(upperBody);
+
+scene.add(player);
+
+// ---------- 木・岩の配置 ----------
+const obstacles = []; // { x, z, radius }
+const treeTrunkMat = new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.9 });
+const treeLeafMat = new THREE.MeshStandardMaterial({ color: 0x2f6b4f, roughness: 0.8 });
+const treeSnowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
+
+function addTree(x, z) {
+  const g = new THREE.Group();
+  const h = 2.2 + Math.random() * 1.8;
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 0.8, 8), treeTrunkMat);
+  trunk.position.y = 0.4;
+  trunk.castShadow = true;
+  g.add(trunk);
+  for (let i = 0; i < 3; i++) {
+    const r = 1.0 - i * 0.26;
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(r, h * 0.45, 10), treeLeafMat);
+    cone.position.y = 0.8 + i * h * 0.28;
+    cone.castShadow = true;
+    g.add(cone);
+    const snowCap = new THREE.Mesh(new THREE.ConeGeometry(r * 0.75, h * 0.2, 10), treeSnowMat);
+    snowCap.position.y = 0.8 + i * h * 0.28 + h * 0.16;
+    g.add(snowCap);
+  }
+  g.position.set(x, groundHeight(x, z), z);
+  scene.add(g);
+  obstacles.push({ x, z, radius: 0.6 });
+}
+
+const rockMat = new THREE.MeshStandardMaterial({ color: 0x9aa5b1, roughness: 0.95, flatShading: true });
+function addRock(x, z) {
+  const s = 0.5 + Math.random() * 0.9;
+  const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(s, 0), rockMat);
+  rock.position.set(x, groundHeight(x, z) + s * 0.35, z);
+  rock.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+  rock.castShadow = true;
+  rock.receiveShadow = true;
+  scene.add(rock);
+  obstacles.push({ x, z, radius: s * 0.85 });
+}
+
+function randomSpot(minR, maxR) {
+  const a = Math.random() * Math.PI * 2;
+  const r = minR + Math.random() * (maxR - minR);
+  return [Math.cos(a) * r, Math.sin(a) * r];
+}
+for (let i = 0; i < 60; i++) addTree(...randomSpot(10, WORLD_RADIUS - 4));
+for (let i = 0; i < 20; i++) addRock(...randomSpot(8, WORLD_RADIUS - 6));
+
+// ---------- 焚き火(ダメージ源・固定) ----------
+const fires = []; // { group, flame, light, x, z }
+const flameMat = new THREE.MeshBasicMaterial({ color: 0xff8c1a });
+const flameInnerMat = new THREE.MeshBasicMaterial({ color: 0xffd23f });
+function addFire(x, z) {
+  const g = new THREE.Group();
+  for (let i = 0; i < 3; i++) {
+    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 1.1, 8), treeTrunkMat);
+    log.rotation.z = Math.PI / 2;
+    log.rotation.y = (i / 3) * Math.PI;
+    log.position.y = 0.1;
+    g.add(log);
+  }
+  const flame = new THREE.Mesh(new THREE.ConeGeometry(0.35, 1.0, 10), flameMat);
+  flame.position.y = 0.65;
+  g.add(flame);
+  const inner = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.6, 10), flameInnerMat);
+  inner.position.y = 0.5;
+  g.add(inner);
+  const light = new THREE.PointLight(0xff9933, 2.2, 12, 1.8);
+  light.position.y = 1.0;
+  g.add(light);
+  g.position.set(x, groundHeight(x, z), z);
+  scene.add(g);
+  fires.push({ group: g, flame, light, x, z });
+}
+for (let i = 0; i < 9; i++) addFire(...randomSpot(14, WORLD_RADIUS - 8));
+
+// ---------- 炎の精霊(ダメージ源・動く敵) ----------
+const spirits = []; // { mesh, light, angle, cx, cz, orbitR, speed, phase }
+const spiritMat = new THREE.MeshBasicMaterial({ color: 0xff5533 });
+function addSpirit(cx, cz) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.35, 16, 16), spiritMat);
+  g.add(body);
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.6, 10), flameInnerMat);
+  tail.position.y = 0.45;
+  g.add(tail);
+  const light = new THREE.PointLight(0xff6644, 1.6, 9, 1.8);
+  g.add(light);
+  scene.add(g);
+  const spirit = {
+    mesh: g,
+    angle: Math.random() * Math.PI * 2,
+    cx, cz,
+    orbitR: 4 + Math.random() * 6,
+    speed: 0.4 + Math.random() * 0.5,
+    phase: Math.random() * Math.PI * 2,
+  };
+  // 生成時に軌道上の初期位置へ配置(原点でプレイヤーに触れないように)
+  const sx = cx + Math.cos(spirit.angle) * spirit.orbitR;
+  const sz = cz + Math.sin(spirit.angle) * spirit.orbitR;
+  g.position.set(sx, groundHeight(sx, sz) + 0.9, sz);
+  spirits.push(spirit);
+}
+for (let i = 0; i < 6; i++) addSpirit(...randomSpot(18, WORLD_RADIUS - 12));
+
+// ---------- クリスタル(収集アイテム) ----------
+const crystals = []; // { mesh, x, z, taken }
+const crystalMat = new THREE.MeshStandardMaterial({
+  color: 0x7dd3fc, emissive: 0x38bdf8, emissiveIntensity: 0.6,
+  roughness: 0.15, metalness: 0.2, transparent: true, opacity: 0.9,
+});
+for (let i = 0; i < CRYSTAL_TOTAL; i++) {
+  const [x, z] = randomSpot(10, WORLD_RADIUS - 8);
+  const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.45, 0), crystalMat);
+  mesh.position.set(x, groundHeight(x, z) + 1.0, z);
+  mesh.castShadow = true;
+  scene.add(mesh);
+  crystals.push({ mesh, x, z, taken: false });
+}
+
+// ---------- 降雪パーティクル ----------
+const SNOW_COUNT = 1800;
+const snowGeo = new THREE.BufferGeometry();
+{
+  const positions = new Float32Array(SNOW_COUNT * 3);
+  for (let i = 0; i < SNOW_COUNT; i++) {
+    positions[i * 3] = (Math.random() - 0.5) * 120;
+    positions[i * 3 + 1] = Math.random() * 40;
+    positions[i * 3 + 2] = (Math.random() - 0.5) * 120;
+  }
+  snowGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+}
+const snowDrift = new Float32Array(SNOW_COUNT);
+for (let i = 0; i < SNOW_COUNT; i++) snowDrift[i] = Math.random() * Math.PI * 2;
+const snowPoints = new THREE.Points(
+  snowGeo,
+  new THREE.PointsMaterial({ color: 0xffffff, size: 0.18, transparent: true, opacity: 0.9 })
+);
+scene.add(snowPoints);
+
+// ---------- ゲーム状態 ----------
+const state = {
+  size: 1.0,           // 雪だるまの大きさ(0.28以下でゲームオーバー)
+  minSize: 0.28,
+  maxSize: 2.2,
+  pos: new THREE.Vector3(0, 0, 0),
+  vel: new THREE.Vector3(),
+  facing: 0,
+  rollAngle: 0,
+  invincible: 0,       // 被ダメ後の無敵時間
+  collected: 0,
+  over: false,
+  won: false,
+};
+
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if ((state.over || state.won) && e.code === 'KeyR') restart();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+const sizefill = document.getElementById('sizefill');
+const crystalLabel = document.getElementById('crystals');
+const overlay = document.getElementById('overlay');
+const overlayTitle = document.getElementById('overlay-title');
+const overlayText = document.getElementById('overlay-text');
+const vignette = document.getElementById('damage-vignette');
+document.getElementById('restart-btn').addEventListener('click', restart);
+
+function updateHUD() {
+  const pct = THREE.MathUtils.clamp(
+    (state.size - state.minSize) / (state.maxSize - state.minSize), 0, 1);
+  sizefill.style.width = (pct * 100).toFixed(1) + '%';
+  sizefill.style.background = pct < 0.15
+    ? 'linear-gradient(90deg, #f87171, #fca5a5)'
+    : 'linear-gradient(90deg, #7dd3fc, #e0f2fe)';
+  crystalLabel.textContent = `💎 ${state.collected} / ${CRYSTAL_TOTAL}`;
+}
+
+function takeDamage(amount, fromX, fromZ) {
+  if (state.invincible > 0 || state.over || state.won) return;
+  state.size = Math.max(0, state.size - amount);
+  state.invincible = 1.2;
+  // ノックバック
+  let dx = state.pos.x - fromX, dz = state.pos.z - fromZ;
+  let d = Math.hypot(dx, dz);
+  if (d < 0.001) { const a = Math.random() * Math.PI * 2; dx = Math.cos(a); dz = Math.sin(a); d = 1; }
+  state.vel.x += (dx / d) * 9;
+  state.vel.z += (dz / d) * 9;
+  vignette.style.opacity = '1';
+  setTimeout(() => { vignette.style.opacity = '0'; }, 180);
+  if (state.size <= state.minSize) gameOver();
+}
+
+function gameOver() {
+  state.over = true;
+  overlayTitle.textContent = 'とけちゃった…';
+  overlayText.textContent = `あつめたクリスタル: ${state.collected} / ${CRYSTAL_TOTAL} — R キーかボタンでリトライ`;
+  overlay.style.display = 'flex';
+}
+
+function gameClear() {
+  state.won = true;
+  overlayTitle.textContent = '🎉 クリア!';
+  overlayText.textContent = 'クリスタルをぜんぶあつめた!ゆきだるまは でんせつになった。';
+  overlay.style.display = 'flex';
+}
+
+function restart() {
+  state.size = 1.0;
+  state.pos.set(0, 0, 0);
+  state.vel.set(0, 0, 0);
+  state.facing = 0;
+  state.rollAngle = 0;
+  state.invincible = 0;
+  state.collected = 0;
+  state.over = false;
+  state.won = false;
+  for (const c of crystals) {
+    c.taken = false;
+    c.mesh.visible = true;
+  }
+  overlay.style.display = 'none';
+  updateHUD();
+}
+
+// ---------- メインループ ----------
+const clock = new THREE.Clock();
+const camTarget = new THREE.Vector3();
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+  const playing = !state.over && !state.won;
+
+  // --- 入力と移動 ---
+  if (playing) {
+    let ix = 0, iz = 0;
+    if (keys['KeyW'] || keys['ArrowUp']) iz -= 1;
+    if (keys['KeyS'] || keys['ArrowDown']) iz += 1;
+    if (keys['KeyA'] || keys['ArrowLeft']) ix -= 1;
+    if (keys['KeyD'] || keys['ArrowRight']) ix += 1;
+
+    // 大きいほど重くて遅い、小さいほど速い
+    const speed = 10 / (0.55 + state.size * 0.6);
+    if (ix !== 0 || iz !== 0) {
+      const len = Math.hypot(ix, iz);
+      state.vel.x += (ix / len) * speed * dt * 6;
+      state.vel.z += (iz / len) * speed * dt * 6;
+    }
+    // 摩擦と速度上限
+    state.vel.multiplyScalar(Math.pow(0.0025, dt));
+    const vlen = Math.hypot(state.vel.x, state.vel.z);
+    if (vlen > speed) {
+      state.vel.x *= speed / vlen;
+      state.vel.z *= speed / vlen;
+    }
+
+    const prevX = state.pos.x, prevZ = state.pos.z;
+    state.pos.x += state.vel.x * dt;
+    state.pos.z += state.vel.z * dt;
+
+    // 世界の端
+    const rr = Math.hypot(state.pos.x, state.pos.z);
+    if (rr > WORLD_RADIUS) {
+      state.pos.x *= WORLD_RADIUS / rr;
+      state.pos.z *= WORLD_RADIUS / rr;
+    }
+    // 障害物(木・岩)との衝突
+    const bodyR = 0.55 * state.size;
+    for (const o of obstacles) {
+      const dx = state.pos.x - o.x, dz = state.pos.z - o.z;
+      const d = Math.hypot(dx, dz);
+      const minD = o.radius + bodyR;
+      if (d < minD && d > 0.001) {
+        state.pos.x = o.x + (dx / d) * minD;
+        state.pos.z = o.z + (dz / d) * minD;
+      }
+    }
+
+    // --- 転がって成長 ---
+    const moved = Math.hypot(state.pos.x - prevX, state.pos.z - prevZ);
+    if (moved > 0.001) {
+      // 大きくなるほど成長は遅くなる
+      const growth = moved * 0.012 / (0.5 + state.size);
+      state.size = Math.min(state.maxSize, state.size + growth);
+      state.rollAngle += moved / (0.55 * state.size);
+      state.facing = Math.atan2(state.vel.x, state.vel.z);
+    }
+
+    // --- 焚き火のダメージ ---
+    for (const f of fires) {
+      const d = Math.hypot(state.pos.x - f.x, state.pos.z - f.z);
+      if (d < 1.4 + bodyR) takeDamage(0.3, f.x, f.z);
+    }
+    // --- 炎の精霊のダメージ ---
+    for (const s of spirits) {
+      const p = s.mesh.position;
+      const d = Math.hypot(state.pos.x - p.x, state.pos.z - p.z);
+      if (d < 0.5 + bodyR) takeDamage(0.22, p.x, p.z);
+    }
+    // --- クリスタル収集 ---
+    for (const c of crystals) {
+      if (c.taken) continue;
+      const d = Math.hypot(state.pos.x - c.x, state.pos.z - c.z);
+      if (d < 1.0 + bodyR) {
+        c.taken = true;
+        c.mesh.visible = false;
+        state.collected++;
+        if (state.collected >= CRYSTAL_TOTAL) gameClear();
+      }
+    }
+
+    if (state.invincible > 0) state.invincible -= dt;
+    updateHUD();
+  }
+
+  // --- プレイヤーの見た目更新 ---
+  const gy = groundHeight(state.pos.x, state.pos.z);
+  player.position.set(state.pos.x, gy, state.pos.z);
+  player.scale.setScalar(state.size);
+  player.rotation.y = state.facing;
+  bottomBall.rotation.x = state.rollAngle;      // 下玉が転がる
+  upperBody.position.y = Math.sin(t * 6) * 0.02; // わずかに弾む
+  // 被ダメ中は点滅
+  player.visible = !(state.invincible > 0 && Math.floor(t * 12) % 2 === 0);
+
+  // --- 敵とオブジェクトのアニメーション ---
+  for (const f of fires) {
+    const s = 1 + Math.sin(t * 9 + f.x) * 0.15;
+    f.flame.scale.set(s, 1 + Math.sin(t * 7 + f.z) * 0.2, s);
+    f.light.intensity = 2.0 + Math.sin(t * 11 + f.x * 2) * 0.5;
+  }
+  for (const s of spirits) {
+    s.angle += s.speed * dt;
+    const px = s.cx + Math.cos(s.angle) * s.orbitR;
+    const pz = s.cz + Math.sin(s.angle) * s.orbitR;
+    const py = groundHeight(px, pz) + 0.9 + Math.sin(t * 3 + s.phase) * 0.25;
+    s.mesh.position.set(px, py, pz);
+  }
+  for (const c of crystals) {
+    if (c.taken) continue;
+    c.mesh.rotation.y = t * 1.5;
+    c.mesh.position.y = groundHeight(c.x, c.z) + 1.0 + Math.sin(t * 2 + c.x) * 0.15;
+  }
+
+  // --- 降雪 ---
+  {
+    const pos = snowGeo.attributes.position;
+    for (let i = 0; i < SNOW_COUNT; i++) {
+      let y = pos.getY(i) - dt * (1.5 + (i % 5) * 0.4);
+      if (y < 0) y = 40;
+      pos.setY(i, y);
+      pos.setX(i, pos.getX(i) + Math.sin(t + snowDrift[i]) * dt * 0.4);
+    }
+    pos.needsUpdate = true;
+    snowPoints.position.x = state.pos.x - 0; // 雪はプレイヤー付近に追従
+    snowPoints.position.z = state.pos.z - 0;
+  }
+
+  // --- カメラ追従 ---
+  const camDist = 7 + state.size * 2.5;
+  const camHeight = 4 + state.size * 1.5;
+  camTarget.set(
+    state.pos.x - Math.sin(state.facing) * camDist,
+    gy + camHeight,
+    state.pos.z - Math.cos(state.facing) * camDist
+  );
+  camera.position.lerp(camTarget, 1 - Math.pow(0.001, dt));
+  camera.lookAt(state.pos.x, gy + 1.2 * state.size, state.pos.z);
+
+  renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+updateHUD();
+camera.position.set(0, 6, -9);
+tick();
+</script>
+</body>
+</html>

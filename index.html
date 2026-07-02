@@ -100,11 +100,18 @@
 </div>
 
 <script type="importmap">
-{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
 </script>
 
 <script type="module">
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // ---------- 基本セットアップ ----------
 const WORLD_RADIUS = 90;
@@ -112,27 +119,206 @@ const CRYSTAL_TOTAL = 12;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// モバイルはブルーム負荷を抑えるため解像度を少し下げる
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 'ontouchstart' in window ? 1.5 : 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('app').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x9db8d8);
-scene.fog = new THREE.Fog(0x9db8d8, 30, 110);
+scene.background = new THREE.Color(0x05070f);
+scene.fog = new THREE.Fog(0x191c40, 35, 130);
 
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 300);
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500);
 
-const hemi = new THREE.HemisphereLight(0xdfeaff, 0x8899bb, 0.9);
+// 光るものすべてが淡く滲むブルーム
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight), 0.9, 0.6, 0.5);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+// やわらかい丸い光のスプライト(パーティクル用)
+function makeGlowTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const ctx = c.getContext('2d');
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.4, 'rgba(255,255,255,0.6)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+const glowTex = makeGlowTexture();
+
+// 月夜の光
+const hemi = new THREE.HemisphereLight(0x8aa2ff, 0x2a3260, 0.48);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xfff4e0, 1.1);
-sun.position.set(30, 50, 20);
+const sun = new THREE.DirectionalLight(0xbcd2ff, 0.75); // 月光
+sun.position.set(-60, 70, -40);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.camera.left = -60; sun.shadow.camera.right = 60;
 sun.shadow.camera.top = 60; sun.shadow.camera.bottom = -60;
-sun.shadow.camera.far = 150;
+sun.shadow.camera.far = 200;
 scene.add(sun);
+
+// ---------- 幻想の夜空 ----------
+// 空ドーム(黄昏色のグラデーション)
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(320, 32, 16),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    vertexShader: `
+      varying vec3 vPos;
+      void main() { vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+    `,
+    fragmentShader: `
+      varying vec3 vPos;
+      void main() {
+        float h = normalize(vPos).y;
+        vec3 zenith  = vec3(0.012, 0.016, 0.075);
+        vec3 mid     = vec3(0.055, 0.065, 0.22);
+        vec3 horizon = vec3(0.15, 0.10, 0.30);
+        vec3 col = mix(horizon, mid, smoothstep(-0.05, 0.22, h));
+        col = mix(col, zenith, smoothstep(0.22, 0.7, h));
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+  })
+);
+scene.add(sky);
+
+// 星空(2層。片方は瞬く)
+function makeStars(count, size) {
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const y = Math.random() * 0.85 + 0.06; // 上半球
+    const r = Math.sqrt(1 - y * y);
+    pos[i * 3] = Math.cos(a) * r * 300;
+    pos[i * 3 + 1] = y * 300;
+    pos[i * 3 + 2] = Math.sin(a) * r * 300;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({
+    color: 0xdfe8ff, size, sizeAttenuation: false, map: glowTex,
+    transparent: true, opacity: 0.9, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const points = new THREE.Points(geo, mat);
+  scene.add(points);
+  return mat;
+}
+makeStars(700, 1.4);
+const twinkleMat = makeStars(250, 2.2);
+
+// 月(発光スプライト)
+const moonCanvas = document.createElement('canvas');
+moonCanvas.width = moonCanvas.height = 256;
+{
+  const ctx = moonCanvas.getContext('2d');
+  const g = ctx.createRadialGradient(128, 128, 10, 128, 128, 128);
+  g.addColorStop(0, 'rgba(255,253,240,1)');
+  g.addColorStop(0.3, 'rgba(255,250,230,1)');
+  g.addColorStop(0.42, 'rgba(220,228,255,0.5)');
+  g.addColorStop(0.6, 'rgba(160,180,255,0.18)');
+  g.addColorStop(1, 'rgba(120,140,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 256, 256);
+}
+const moon = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: new THREE.CanvasTexture(moonCanvas),
+  transparent: true, fog: false,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+}));
+moon.scale.setScalar(70);
+moon.position.set(-140, 115, -170);
+scene.add(moon);
+
+// オーロラ(世界をぐるりと囲む光のカーテン)
+const auroras = [];
+function addAurora(radius, height, y, colA, colB, speed, opacity) {
+  const geo = new THREE.CylinderGeometry(radius, radius, height, 96, 1, true);
+  const mat = new THREE.ShaderMaterial({
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    fog: false,
+    uniforms: {
+      uTime: { value: 0 },
+      uColA: { value: new THREE.Color(colA) },
+      uColB: { value: new THREE.Color(colB) },
+      uOpacity: { value: opacity },
+      uSpeed: { value: speed },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+    `,
+    fragmentShader: `
+      uniform float uTime, uOpacity, uSpeed;
+      uniform vec3 uColA, uColB;
+      varying vec2 vUv;
+      void main() {
+        float u = vUv.x * 6.2831853;
+        float t = uTime * uSpeed;
+        float wave = sin(u * 3.0 + t * 0.5) + 0.6 * sin(u * 7.0 - t * 0.35) + 0.4 * sin(u * 13.0 + t * 0.9);
+        float curtain = 0.55 + 0.45 * sin(u * 22.0 + wave * 2.2 + t * 0.2);
+        float y = clamp(vUv.y + wave * 0.05, 0.0, 1.0);
+        float base = smoothstep(0.0, 0.16, y);
+        float fade = 1.0 - smoothstep(0.18, 0.95, y);
+        float glow = smoothstep(0.0, 0.06, y) * (1.0 - smoothstep(0.06, 0.4, y));
+        float a = (curtain * base * fade * 0.45 + glow * 0.5) * uOpacity;
+        vec3 col = mix(uColA, uColB, y + 0.15 * sin(u * 2.0 + t * 0.15));
+        gl_FragColor = vec4(col * a, a);
+      }
+    `,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.y = y;
+  scene.add(mesh);
+  auroras.push(mat);
+}
+addAurora(150, 80, 58, 0x2effa8, 0x1e6dff, 1.0, 0.9);
+addAurora(190, 100, 74, 0xb44dff, 0xff5fd0, 0.7, 0.6);
+
+// 光の精(漂う光の粒)
+const FIREFLY_COUNT = 120;
+const fireflyGeo = new THREE.BufferGeometry();
+const fireflyBase = new Float32Array(FIREFLY_COUNT * 3);
+const fireflyPhase = new Float32Array(FIREFLY_COUNT);
+{
+  const pos = new Float32Array(FIREFLY_COUNT * 3);
+  const col = new Float32Array(FIREFLY_COUNT * 3);
+  const palette = [new THREE.Color(0x8fe3ff), new THREE.Color(0xffa8e8),
+                   new THREE.Color(0xfff0a8), new THREE.Color(0xa8ffd8)];
+  for (let i = 0; i < FIREFLY_COUNT; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = 6 + Math.random() * (WORLD_RADIUS - 6);
+    fireflyBase[i * 3] = Math.cos(a) * r;
+    fireflyBase[i * 3 + 1] = 0.6 + Math.random() * 3.2;
+    fireflyBase[i * 3 + 2] = Math.sin(a) * r;
+    fireflyPhase[i] = Math.random() * Math.PI * 2;
+    pos.set([fireflyBase[i * 3], fireflyBase[i * 3 + 1], fireflyBase[i * 3 + 2]], i * 3);
+    const c = palette[i % palette.length];
+    col.set([c.r, c.g, c.b], i * 3);
+  }
+  fireflyGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  fireflyGeo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+}
+const fireflies = new THREE.Points(fireflyGeo, new THREE.PointsMaterial({
+  vertexColors: true, size: 0.5, map: glowTex, transparent: true, opacity: 0.95,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+}));
+scene.add(fireflies);
 
 // ---------- 雪原 ----------
 const groundGeo = new THREE.CircleGeometry(WORLD_RADIUS + 20, 64);
@@ -148,7 +334,7 @@ const groundGeo = new THREE.CircleGeometry(WORLD_RADIUS + 20, 64);
 }
 const ground = new THREE.Mesh(
   groundGeo,
-  new THREE.MeshStandardMaterial({ color: 0xf4f8ff, roughness: 0.95 })
+  new THREE.MeshStandardMaterial({ color: 0xdde6ff, roughness: 0.9 })
 );
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
@@ -221,6 +407,11 @@ bucket.castShadow = true;
 upperBody.add(bucket);
 player.add(upperBody);
 
+// 雪だるまがまとうほのかな光(夜の世界で道を照らす)
+const lantern = new THREE.PointLight(0xaad4ff, 1.4, 9, 1.6);
+lantern.position.set(0, 1.9, 0);
+player.add(lantern);
+
 scene.add(player);
 
 // ---------- 木・岩の配置 ----------
@@ -263,13 +454,59 @@ function addRock(x, z) {
   obstacles.push({ x, z, radius: s * 0.85 });
 }
 
+// 氷晶樹(光るクリスタルの木)
+const crystalTreePalette = [0x7dd3fc, 0xd8b4fe, 0x99f6e4, 0xfda4af];
+function addCrystalTree(x, z) {
+  const g = new THREE.Group();
+  const color = crystalTreePalette[Math.floor(Math.random() * crystalTreePalette.length)];
+  const mat = new THREE.MeshStandardMaterial({
+    color, emissive: color, emissiveIntensity: 0.55,
+    transparent: true, opacity: 0.85, roughness: 0.15, metalness: 0.1,
+  });
+  const n = 3 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < n; i++) {
+    const h = 1.6 + Math.random() * 2.6;
+    const shard = new THREE.Mesh(new THREE.ConeGeometry(0.14 + Math.random() * 0.18, h, 5), mat);
+    const a = Math.random() * Math.PI * 2;
+    const r = i === 0 ? 0 : 0.2 + Math.random() * 0.5;
+    shard.position.set(Math.cos(a) * r, h / 2 - 0.05, Math.sin(a) * r);
+    shard.rotation.set((Math.random() - 0.5) * 0.35, Math.random() * Math.PI, (Math.random() - 0.5) * 0.35);
+    shard.castShadow = true;
+    g.add(shard);
+  }
+  g.position.set(x, groundHeight(x, z), z);
+  scene.add(g);
+  obstacles.push({ x, z, radius: 0.55 });
+  crystalTreeMats.push({ mat, phase: Math.random() * Math.PI * 2 });
+}
+const crystalTreeMats = [];
+
+// 氷の花(雪原で脈動する小さな光)
+const iceFlowers = []; // { mat, phase }
+function addIceFlower(x, z) {
+  const color = crystalTreePalette[Math.floor(Math.random() * crystalTreePalette.length)];
+  const mat = new THREE.MeshStandardMaterial({
+    color, emissive: color, emissiveIntensity: 0.8, roughness: 0.3,
+  });
+  const gy = groundHeight(x, z);
+  for (let i = 0; i < 3; i++) {
+    const s = 0.1 + Math.random() * 0.12;
+    const petal = new THREE.Mesh(new THREE.OctahedronGeometry(s, 0), mat);
+    petal.position.set(x + (Math.random() - 0.5) * 0.6, gy + s * 0.9, z + (Math.random() - 0.5) * 0.6);
+    scene.add(petal);
+  }
+  iceFlowers.push({ mat, phase: Math.random() * Math.PI * 2 });
+}
+
 function randomSpot(minR, maxR) {
   const a = Math.random() * Math.PI * 2;
   const r = minR + Math.random() * (maxR - minR);
   return [Math.cos(a) * r, Math.sin(a) * r];
 }
-for (let i = 0; i < 60; i++) addTree(...randomSpot(10, WORLD_RADIUS - 4));
+for (let i = 0; i < 38; i++) addTree(...randomSpot(10, WORLD_RADIUS - 4));
+for (let i = 0; i < 24; i++) addCrystalTree(...randomSpot(9, WORLD_RADIUS - 4));
 for (let i = 0; i < 20; i++) addRock(...randomSpot(8, WORLD_RADIUS - 6));
+for (let i = 0; i < 50; i++) addIceFlower(...randomSpot(5, WORLD_RADIUS - 3));
 
 // ---------- 焚き火(ダメージ源・固定) ----------
 const fires = []; // { group, flame, light, x, z }
@@ -332,7 +569,7 @@ for (let i = 0; i < 6; i++) addSpirit(...randomSpot(18, WORLD_RADIUS - 12));
 // ---------- クリスタル(収集アイテム) ----------
 const crystals = []; // { mesh, x, z, taken }
 const crystalMat = new THREE.MeshStandardMaterial({
-  color: 0x7dd3fc, emissive: 0x38bdf8, emissiveIntensity: 0.6,
+  color: 0x7dd3fc, emissive: 0x38bdf8, emissiveIntensity: 1.2,
   roughness: 0.15, metalness: 0.2, transparent: true, opacity: 0.9,
 });
 for (let i = 0; i < CRYSTAL_TOTAL; i++) {
@@ -360,7 +597,7 @@ function spawnPickup(x, z) {
 }
 
 // ---------- 降雪パーティクル ----------
-const SNOW_COUNT = 1800;
+const SNOW_COUNT = 2600;
 const snowGeo = new THREE.BufferGeometry();
 {
   const positions = new Float32Array(SNOW_COUNT * 3);
@@ -375,9 +612,18 @@ const snowDrift = new Float32Array(SNOW_COUNT);
 for (let i = 0; i < SNOW_COUNT; i++) snowDrift[i] = Math.random() * Math.PI * 2;
 const snowPoints = new THREE.Points(
   snowGeo,
-  new THREE.PointsMaterial({ color: 0xffffff, size: 0.18, transparent: true, opacity: 0.9 })
+  new THREE.PointsMaterial({ color: 0xdce8ff, size: 0.22, map: glowTex, transparent: true, opacity: 0.85, depthWrite: false })
 );
 scene.add(snowPoints);
+// 月明かりにきらめく大粒の雪
+const snowGlow = new THREE.Points(
+  snowGeo,
+  new THREE.PointsMaterial({
+    color: 0xbfd8ff, size: 0.5, map: glowTex, transparent: true, opacity: 0.35,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  })
+);
+scene.add(snowGlow);
 
 // ---------- ゲーム状態 ----------
 const state = {
@@ -777,6 +1023,26 @@ function tick() {
     p.mesh.rotation.y = t * 2.5;
     p.mesh.position.y = groundHeight(p.x, p.z) + 0.7 + Math.sin(t * 3 + p.x) * 0.12;
   }
+
+  // --- 幻想世界のアニメーション ---
+  for (const a of auroras) a.uniforms.uTime.value = t;
+  twinkleMat.opacity = 0.45 + 0.45 * Math.sin(t * 1.7);
+  {
+    const pos = fireflyGeo.attributes.position;
+    for (let i = 0; i < FIREFLY_COUNT; i++) {
+      const ph = fireflyPhase[i];
+      pos.setXYZ(
+        i,
+        fireflyBase[i * 3] + Math.sin(t * 0.31 + ph) * 2.2,
+        fireflyBase[i * 3 + 1] + Math.sin(t * 0.9 + ph * 1.7) * 0.55,
+        fireflyBase[i * 3 + 2] + Math.cos(t * 0.27 + ph * 0.8) * 2.2
+      );
+    }
+    pos.needsUpdate = true;
+  }
+  for (const f of iceFlowers) f.mat.emissiveIntensity = 0.55 + 0.45 * Math.sin(t * 2.2 + f.phase);
+  for (const c of crystalTreeMats) c.mat.emissiveIntensity = 0.4 + 0.3 * Math.sin(t * 1.4 + c.phase);
+  lantern.intensity = 1.3 + Math.sin(t * 2.6) * 0.25;
   for (const c of crystals) {
     if (c.taken) continue;
     c.mesh.rotation.y = t * 1.5;
@@ -799,22 +1065,24 @@ function tick() {
 
   // --- カメラ追従 ---
   const camDist = 7 + state.size * 2.5;
-  const camHeight = 4 + state.size * 1.5;
+  const camHeight = 3.4 + state.size * 1.4;
   camTarget.set(
     state.pos.x - Math.sin(state.facing) * camDist,
     gy + camHeight,
     state.pos.z - Math.cos(state.facing) * camDist
   );
   camera.position.lerp(camTarget, 1 - Math.pow(0.001, dt));
-  camera.lookAt(state.pos.x, gy + 1.2 * state.size, state.pos.z);
+  // 少し上を向かせて、空(オーロラ・月)が視界に入るように
+  camera.lookAt(state.pos.x, gy + 1.2 * state.size + 1.6, state.pos.z);
 
-  renderer.render(scene, camera);
+  composer.render();
 }
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
 });
 
 updateHUD();

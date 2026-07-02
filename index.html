@@ -2,11 +2,27 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>ゆきだるまアドベンチャー</title>
 <style>
-  html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #0b1026; }
+  html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #0b1026;
+    touch-action: none; overscroll-behavior: none; -webkit-user-select: none; user-select: none; }
   #app { position: fixed; inset: 0; }
+  #joystick {
+    position: fixed; z-index: 12; display: none;
+    width: 120px; height: 120px; margin: -60px 0 0 -60px;
+    border-radius: 50%; pointer-events: none;
+    background: rgba(255,255,255,.12);
+    border: 2px solid rgba(255,255,255,.35);
+    backdrop-filter: blur(2px);
+  }
+  #joystick-knob {
+    position: absolute; left: 50%; top: 50%;
+    width: 52px; height: 52px; margin: -26px 0 0 -26px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.55);
+    box-shadow: 0 2px 8px rgba(0,0,0,.25);
+  }
   .hud {
     position: fixed; top: 16px; left: 16px; z-index: 10;
     color: #fff; font-family: "Segoe UI", "Hiragino Sans", sans-serif;
@@ -63,6 +79,7 @@
 </div>
 
 <div id="help">WASD / 矢印キー で移動 — 雪の上を転がると大きくなる。炎に近づくと小さくなるよ!</div>
+<div id="joystick"><div id="joystick-knob"></div></div>
 <div id="damage-vignette"></div>
 
 <div id="overlay">
@@ -357,6 +374,59 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 
+// ---------- タッチ操作(バーチャルジョイスティック) ----------
+const joyEl = document.getElementById('joystick');
+const joyKnob = document.getElementById('joystick-knob');
+const JOY_RADIUS = 55;
+let joyTouchId = null;
+const joyOrigin = { x: 0, y: 0 };
+const joyVec = { x: 0, y: 0 }; // -1..1(x: 右+, y: 下+)
+
+window.addEventListener('touchstart', e => {
+  if (state.over || state.won) return; // オーバーレイのボタン操作を邪魔しない
+  if (joyTouchId !== null) return;
+  const t = e.changedTouches[0];
+  joyTouchId = t.identifier;
+  joyOrigin.x = t.clientX;
+  joyOrigin.y = t.clientY;
+  joyVec.x = 0; joyVec.y = 0;
+  joyEl.style.display = 'block';
+  joyEl.style.left = joyOrigin.x + 'px';
+  joyEl.style.top = joyOrigin.y + 'px';
+  joyKnob.style.transform = 'translate(0px, 0px)';
+  e.preventDefault();
+}, { passive: false });
+
+window.addEventListener('touchmove', e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier !== joyTouchId) continue;
+    let dx = t.clientX - joyOrigin.x;
+    let dy = t.clientY - joyOrigin.y;
+    const d = Math.hypot(dx, dy);
+    if (d > JOY_RADIUS) { dx *= JOY_RADIUS / d; dy *= JOY_RADIUS / d; }
+    joyKnob.style.transform = `translate(${dx}px, ${dy}px)`;
+    joyVec.x = dx / JOY_RADIUS;
+    joyVec.y = dy / JOY_RADIUS;
+  }
+  e.preventDefault();
+}, { passive: false });
+
+function joyEnd(e) {
+  for (const t of e.changedTouches) {
+    if (t.identifier !== joyTouchId) continue;
+    joyTouchId = null;
+    joyVec.x = 0; joyVec.y = 0;
+    joyEl.style.display = 'none';
+  }
+}
+window.addEventListener('touchend', joyEnd);
+window.addEventListener('touchcancel', joyEnd);
+
+if ('ontouchstart' in window) {
+  document.getElementById('help').textContent =
+    '画面をドラッグして移動 — 雪の上を転がると大きくなる。炎に近づくと小さくなるよ!';
+}
+
 const sizefill = document.getElementById('sizefill');
 const crystalLabel = document.getElementById('crystals');
 const overlay = document.getElementById('overlay');
@@ -425,6 +495,9 @@ function restart() {
 // ---------- メインループ ----------
 const clock = new THREE.Clock();
 const camTarget = new THREE.Vector3();
+const camFwd = new THREE.Vector3();
+const camRight = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
 
 function tick() {
   requestAnimationFrame(tick);
@@ -440,10 +513,21 @@ function tick() {
     if (keys['KeyA'] || keys['ArrowLeft']) ix -= 1;
     if (keys['KeyD'] || keys['ArrowRight']) ix += 1;
 
+    // ジョイスティック入力はカメラの向き基準(上=カメラの前方)
+    if (joyTouchId !== null && (joyVec.x !== 0 || joyVec.y !== 0)) {
+      camera.getWorldDirection(camFwd);
+      camFwd.y = 0;
+      camFwd.normalize();
+      camRight.crossVectors(camFwd, UP);
+      ix += camRight.x * joyVec.x - camFwd.x * joyVec.y;
+      iz += camRight.z * joyVec.x - camFwd.z * joyVec.y;
+    }
+
     // 大きいほど重くて遅い、小さいほど速い
     const speed = 10 / (0.55 + state.size * 0.6);
     if (ix !== 0 || iz !== 0) {
-      const len = Math.hypot(ix, iz);
+      let len = Math.hypot(ix, iz);
+      if (len < 1) len = 1; // スティックの倒し具合で速さを調整できる
       state.vel.x += (ix / len) * speed * dt * 6;
       state.vel.z += (iz / len) * speed * dt * 6;
     }

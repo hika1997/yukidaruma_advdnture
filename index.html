@@ -62,6 +62,16 @@
     box-shadow: 0 4px 16px rgba(125, 211, 252, .4);
   }
   #overlay button:hover { transform: scale(1.05); }
+  #throwbtn {
+    position: fixed; right: 24px; bottom: 40px; z-index: 12;
+    width: 78px; height: 78px; border-radius: 50%;
+    display: none; align-items: center; justify-content: center;
+    font-size: 36px; cursor: pointer;
+    background: rgba(255,255,255,.22);
+    border: 2px solid rgba(255,255,255,.5);
+    -webkit-tap-highlight-color: transparent;
+  }
+  #throwbtn:active { background: rgba(255,255,255,.45); }
   #damage-vignette {
     position: fixed; inset: 0; z-index: 15; pointer-events: none; opacity: 0;
     background: radial-gradient(ellipse at center, transparent 55%, rgba(255,60,40,.55) 100%);
@@ -80,6 +90,7 @@
 
 <div id="help">WASD / 矢印キー で移動 — 雪の上を転がると大きくなる。炎に近づくと小さくなるよ!</div>
 <div id="joystick"><div id="joystick-knob"></div></div>
+<div id="throwbtn">❄️</div>
 <div id="damage-vignette"></div>
 
 <div id="overlay">
@@ -284,7 +295,7 @@ function addFire(x, z) {
   g.add(light);
   g.position.set(x, groundHeight(x, z), z);
   scene.add(g);
-  fires.push({ group: g, flame, light, x, z });
+  fires.push({ group: g, flame, inner, light, x, z, doused: 0 });
 }
 for (let i = 0; i < 9; i++) addFire(...randomSpot(14, WORLD_RADIUS - 8));
 
@@ -308,6 +319,7 @@ function addSpirit(cx, cz) {
     orbitR: 4 + Math.random() * 6,
     speed: 0.4 + Math.random() * 0.5,
     phase: Math.random() * Math.PI * 2,
+    down: 0,
   };
   // 生成時に軌道上の初期位置へ配置(原点でプレイヤーに触れないように)
   const sx = cx + Math.cos(spirit.angle) * spirit.orbitR;
@@ -330,6 +342,21 @@ for (let i = 0; i < CRYSTAL_TOTAL; i++) {
   mesh.castShadow = true;
   scene.add(mesh);
   crystals.push({ mesh, x, z, taken: false });
+}
+
+// ---------- 雪玉と雪の結晶(ドロップ) ----------
+const snowballs = []; // { mesh, vel, life }
+const snowballGeo = new THREE.SphereGeometry(0.16, 12, 12);
+const pickups = []; // { mesh, x, z }
+const pickupMat = new THREE.MeshStandardMaterial({
+  color: 0xffffff, emissive: 0xbfe8ff, emissiveIntensity: 0.8, roughness: 0.2,
+});
+
+function spawnPickup(x, z) {
+  const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.28, 0), pickupMat);
+  mesh.position.set(x, groundHeight(x, z) + 0.7, z);
+  scene.add(mesh);
+  pickups.push({ mesh, x, z });
 }
 
 // ---------- 降雪パーティクル ----------
@@ -371,8 +398,35 @@ const keys = {};
 window.addEventListener('keydown', e => {
   keys[e.code] = true;
   if ((state.over || state.won) && e.code === 'KeyR') restart();
+  if (e.code === 'Space' && !e.repeat) throwSnowball();
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ---------- 雪玉を投げる ----------
+let throwCooldown = 0;
+function throwSnowball() {
+  if (state.over || state.won || throwCooldown > 0) return;
+  if (state.size <= state.minSize + 0.1) return; // 小さすぎると投げられない
+  throwCooldown = 0.35;
+  state.size -= 0.03; // 自分の雪を少し使う
+  const dir = new THREE.Vector3(Math.sin(state.facing), 0, Math.cos(state.facing));
+  const gy = groundHeight(state.pos.x, state.pos.z);
+  const mesh = new THREE.Mesh(snowballGeo, snowMat);
+  // 炎や精霊(高さ1前後)に当たるよう低めの弾道で投げる
+  mesh.position.set(
+    state.pos.x + dir.x * 0.7 * state.size,
+    gy + 0.9 + 0.3 * state.size,
+    state.pos.z + dir.z * 0.7 * state.size
+  );
+  mesh.castShadow = true;
+  scene.add(mesh);
+  snowballs.push({
+    mesh,
+    vel: new THREE.Vector3(dir.x * 16, 1.0, dir.z * 16),
+    life: 2.5,
+  });
+  updateHUD();
+}
 
 // ---------- タッチ操作(バーチャルジョイスティック) ----------
 const joyEl = document.getElementById('joystick');
@@ -384,6 +438,7 @@ const joyVec = { x: 0, y: 0 }; // -1..1(x: 右+, y: 下+)
 
 window.addEventListener('touchstart', e => {
   if (state.over || state.won) return; // オーバーレイのボタン操作を邪魔しない
+  if (e.target.closest && e.target.closest('#throwbtn')) return;
   if (joyTouchId !== null) return;
   const t = e.changedTouches[0];
   joyTouchId = t.identifier;
@@ -422,9 +477,21 @@ function joyEnd(e) {
 window.addEventListener('touchend', joyEnd);
 window.addEventListener('touchcancel', joyEnd);
 
+const throwBtn = document.getElementById('throwbtn');
+throwBtn.addEventListener('touchstart', e => {
+  e.preventDefault();
+  e.stopPropagation();
+  throwSnowball();
+}, { passive: false });
+throwBtn.addEventListener('click', () => throwSnowball());
+
 if ('ontouchstart' in window) {
   document.getElementById('help').textContent =
-    '画面をドラッグして移動 — 雪の上を転がると大きくなる。炎に近づくと小さくなるよ!';
+    '画面をドラッグして移動、❄️ボタンで雪玉!雪玉で炎を消せるよ。炎に触れると小さくなる!';
+  throwBtn.style.display = 'flex';
+} else {
+  document.getElementById('help').textContent =
+    'WASD / 矢印キー で移動、スペースで雪玉!転がると大きくなり、雪玉で炎を消せる。炎に触れると小さくなるよ!';
 }
 
 const sizefill = document.getElementById('sizefill');
@@ -488,6 +555,20 @@ function restart() {
     c.taken = false;
     c.mesh.visible = true;
   }
+  for (const f of fires) {
+    f.doused = 0;
+    f.flame.visible = true;
+    f.inner.visible = true;
+  }
+  for (const s of spirits) {
+    s.down = 0;
+    s.mesh.visible = true;
+  }
+  for (const b of snowballs) scene.remove(b.mesh);
+  snowballs.length = 0;
+  for (const p of pickups) scene.remove(p.mesh);
+  pickups.length = 0;
+  throwCooldown = 0;
   overlay.style.display = 'none';
   updateHUD();
 }
@@ -571,16 +652,28 @@ function tick() {
       state.facing = Math.atan2(state.vel.x, state.vel.z);
     }
 
-    // --- 焚き火のダメージ ---
+    // --- 焚き火のダメージ(消えている間は安全) ---
     for (const f of fires) {
+      if (f.doused > 0) continue;
       const d = Math.hypot(state.pos.x - f.x, state.pos.z - f.z);
       if (d < 1.4 + bodyR) takeDamage(0.3, f.x, f.z);
     }
     // --- 炎の精霊のダメージ ---
     for (const s of spirits) {
+      if (s.down > 0) continue;
       const p = s.mesh.position;
       const d = Math.hypot(state.pos.x - p.x, state.pos.z - p.z);
       if (d < 0.5 + bodyR) takeDamage(0.22, p.x, p.z);
+    }
+    // --- 雪の結晶(ドロップ)を拾う ---
+    for (let i = pickups.length - 1; i >= 0; i--) {
+      const p = pickups[i];
+      const d = Math.hypot(state.pos.x - p.x, state.pos.z - p.z);
+      if (d < 0.8 + bodyR) {
+        state.size = Math.min(state.maxSize, state.size + 0.12);
+        scene.remove(p.mesh);
+        pickups.splice(i, 1);
+      }
     }
     // --- クリスタル収集 ---
     for (const c of crystals) {
@@ -595,6 +688,46 @@ function tick() {
     }
 
     if (state.invincible > 0) state.invincible -= dt;
+    if (throwCooldown > 0) throwCooldown -= dt;
+
+    // --- 雪玉の飛行と命中判定 ---
+    for (let i = snowballs.length - 1; i >= 0; i--) {
+      const b = snowballs[i];
+      b.vel.y -= 16 * dt;
+      b.mesh.position.addScaledVector(b.vel, dt);
+      b.life -= dt;
+      let hit = b.life <= 0 ||
+        b.mesh.position.y < groundHeight(b.mesh.position.x, b.mesh.position.z) + 0.1;
+      if (!hit) {
+        // 炎の精霊に命中 → 倒して雪の結晶を落とす
+        for (const s of spirits) {
+          if (s.down > 0) continue;
+          if (b.mesh.position.distanceTo(s.mesh.position) < 0.7) {
+            s.down = 18;
+            spawnPickup(s.mesh.position.x, s.mesh.position.z);
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (!hit) {
+        // 焚き火に命中 → しばらく消える
+        for (const f of fires) {
+          if (f.doused > 0) continue;
+          const d = Math.hypot(b.mesh.position.x - f.x, b.mesh.position.z - f.z);
+          if (d < 1.1 && b.mesh.position.y < groundHeight(f.x, f.z) + 1.6) {
+            f.doused = 15;
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (hit) {
+        scene.remove(b.mesh);
+        snowballs.splice(i, 1);
+      }
+    }
+
     updateHUD();
   }
 
@@ -610,16 +743,39 @@ function tick() {
 
   // --- 敵とオブジェクトのアニメーション ---
   for (const f of fires) {
+    if (f.doused > 0) {
+      f.doused -= dt;
+      f.flame.visible = false;
+      f.inner.visible = false;
+      f.light.intensity = 0;
+      if (f.doused <= 0) { f.flame.visible = true; f.inner.visible = true; }
+      continue;
+    }
     const s = 1 + Math.sin(t * 9 + f.x) * 0.15;
     f.flame.scale.set(s, 1 + Math.sin(t * 7 + f.z) * 0.2, s);
     f.light.intensity = 2.0 + Math.sin(t * 11 + f.x * 2) * 0.5;
   }
   for (const s of spirits) {
+    if (s.down > 0) {
+      s.down -= dt;
+      s.mesh.visible = false;
+      if (s.down <= 0) {
+        // 別の場所で復活
+        [s.cx, s.cz] = randomSpot(18, WORLD_RADIUS - 12);
+        s.angle = Math.random() * Math.PI * 2;
+        s.mesh.visible = true;
+      }
+      continue;
+    }
     s.angle += s.speed * dt;
     const px = s.cx + Math.cos(s.angle) * s.orbitR;
     const pz = s.cz + Math.sin(s.angle) * s.orbitR;
     const py = groundHeight(px, pz) + 0.9 + Math.sin(t * 3 + s.phase) * 0.25;
     s.mesh.position.set(px, py, pz);
+  }
+  for (const p of pickups) {
+    p.mesh.rotation.y = t * 2.5;
+    p.mesh.position.y = groundHeight(p.x, p.z) + 0.7 + Math.sin(t * 3 + p.x) * 0.12;
   }
   for (const c of crystals) {
     if (c.taken) continue;
